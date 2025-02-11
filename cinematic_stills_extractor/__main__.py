@@ -18,7 +18,10 @@ import typer
 from cinematic_stills_extractor.scene import SceneAnalyzer
 from cinematic_stills_extractor.still_frames import extract_best_frames_from
 from cinematic_stills_extractor.embedding import generate_embeddings_from
-from cinematic_stills_extractor.aesthetic_predictor import AestheticScorer, ensure_weights
+from cinematic_stills_extractor.aesthetic_predictor import (
+    AestheticScorer,
+    ensure_weights,
+)
 
 
 def setup_device() -> str:
@@ -28,8 +31,6 @@ def setup_device() -> str:
     if torch.cuda.is_available():
         return "cuda"
     return "cpu"
-
-
 
 
 def process_video(
@@ -62,7 +63,6 @@ def process_video(
             device=device,
             progress_keeper=progress,
         )
-
 
     analyzer = SceneAnalyzer()
     cluster_labels, probabilities = analyzer.analyze_scenes(
@@ -177,6 +177,7 @@ def export_best_frames(
             f"[yellow]Aesthetic Scores: min={min(scores):.3f}, max={max(scores):.3f}, avg={sum(scores) / len(scores):.3f}[/yellow]"
         )
 
+
 def main(
     video_path: Path = typer.Argument(..., help="Input video file"),
     window_sec: float = typer.Option(2.0, help="Analysis window in seconds"),
@@ -186,9 +187,7 @@ def main(
         10.0, help="Top percentage of exemplars to export"
     ),
     output_dir: Path = typer.Option(Path("output"), help="Output directory"),
-    min_export_count: int = typer.Option(
-        1, help="Minimum number of frames to export"
-    ),
+    min_export_count: int = typer.Option(1, help="Minimum number of frames to export"),
 ) -> None:
     console = Console()
     results = process_video(
@@ -206,5 +205,6 @@ def main(
         min_export_count=min_export_count,
         console=console,
     )
+
 
 typer.run(main)

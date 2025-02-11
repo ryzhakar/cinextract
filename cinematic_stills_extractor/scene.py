@@ -3,6 +3,7 @@ import hdbscan
 import polars as pl
 import numpy as np
 
+
 class SceneAnalyzer:
     def __init__(self):
         self.umap = umap.UMAP(
@@ -12,9 +13,7 @@ class SceneAnalyzer:
             metric="euclidian",
         )
         self.clusterer = hdbscan.HDBSCAN(
-            min_samples=3,
-            cluster_selection_epsilon=0.5,
-            prediction_data=True
+            min_samples=3, cluster_selection_epsilon=0.5, prediction_data=True
         )
 
     def analyze_scenes(

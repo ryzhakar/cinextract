@@ -15,7 +15,6 @@ AESTHETIC_PREDICTOR_WEIGHTS_URL = (
 )
 
 
-
 def ensure_weights(console: Console) -> Path:
     """Download pre-trained weights if not existing."""
     if not AESTHETIC_PREDICTOR_WEIGHTS_PATH.exists():
@@ -27,6 +26,7 @@ def ensure_weights(console: Console) -> Path:
             AESTHETIC_PREDICTOR_WEIGHTS_PATH,
         )
     return AESTHETIC_PREDICTOR_WEIGHTS_PATH
+
 
 class AestheticScorer:
     def __init__(

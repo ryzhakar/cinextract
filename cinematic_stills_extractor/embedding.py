@@ -11,6 +11,7 @@ from rich.progress import (
     Progress,
 )
 
+
 def extract_specific_frame_from(
     capture,
     frame_idx: int,
@@ -44,6 +45,7 @@ class EmbeddingGenerator:
             "Generating embeddings...",
             total=total_frames_count,
         )
+
         def preprocess_batch_from(
             stream: Iterable[Image.Image],
         ) -> torch.Tensor:
@@ -56,12 +58,15 @@ class EmbeddingGenerator:
 
         with torch.no_grad():
             for _ in range(total_frames_count // batch_size + 1):
-                batch_embeddings = self.model.encode_image(preprocess_batch_from(stream).to(self.device))
+                batch_embeddings = self.model.encode_image(
+                    preprocess_batch_from(stream).to(self.device)
+                )
                 embeddings.append(batch_embeddings.cpu().numpy())
 
                 progress_keeper.advance(task, batch_size)
 
         return np.vstack(embeddings)
+
 
 def generate_embeddings_from(
     video_path: Path,
@@ -89,4 +94,3 @@ def generate_embeddings_from(
     )
     capture.release()
     return embeddings
-

@@ -11,6 +11,7 @@ import numpy as np
 
 FRAME_SIZE = 320
 
+
 class Frame(NamedTuple):
     index: int
     timestamp: float
@@ -25,6 +26,7 @@ def frame_quality_from(frame: np.ndarray) -> float:
     blur_measure = cv2.Laplacian(gray, cv2.CV_64F).var()
     luma_std = gray.std()
     return float(0.7 * blur_measure + 0.3 * luma_std)
+
 
 def extract_best_frames_from(
     video_path: Path,
@@ -64,11 +66,7 @@ def extract_best_frames_from(
             offset=offset,
         )
         frames = (
-            Frame(
-                index=idx,
-                timestamp=idx / fps,
-                quality=frame_quality_from(frame)
-            )
+            Frame(index=idx, timestamp=idx / fps, quality=frame_quality_from(frame))
             for idx, frame in window
         )
         top_frames = sorted(frames, key=lambda x: x.quality)
@@ -82,28 +80,29 @@ def extract_best_frames_from(
         progress_keeper.advance(task, advance=window_frames)
         offset += window_frames
 
-    frame_idx, timestamps, quality_scores = zip(*itertools.chain.from_iterable(frame_keeper))
+    frame_idx, timestamps, quality_scores = zip(
+        *itertools.chain.from_iterable(frame_keeper)
+    )
 
     capture.release()
     progress_keeper.update(task, completed=True)
     return pl.concat(
         (
             pl.Series(
-                'frame_idx',
+                "frame_idx",
                 frame_idx,
                 dtype=pl.Int32,
             ).to_frame(),
             pl.Series(
-                'timestamp',
+                "timestamp",
                 timestamps,
                 dtype=pl.Float32,
             ).to_frame(),
             pl.Series(
-                'quality_score',
+                "quality_score",
                 quality_scores,
                 dtype=pl.Float32,
             ).to_frame(),
         ),
-        how='horizontal',
+        how="horizontal",
     )
-
