@@ -1,3 +1,5 @@
+*.parquet
+*.pth
 .DS_Store
 output/
 # Python-generated files
