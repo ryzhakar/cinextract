@@ -1,15 +1,27 @@
+import math
 import numpy as np
 import cv2
 import polars as pl
 from pathlib import Path
-from typing import NamedTuple
+from typing import NamedTuple, Optional
 import torch
 import open_clip
 from PIL import Image
 import umap
 import hdbscan
 import urllib.request
-from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn
+from time import time
+from rich.console import Console
+from rich.progress import (
+    Progress, 
+    SpinnerColumn, 
+    TextColumn, 
+    BarColumn, 
+    TimeRemainingColumn, 
+    TimeElapsedColumn
+)
+
+console = Console()
 
 class Frame(NamedTuple):
     index: int
@@ -17,17 +29,23 @@ class Frame(NamedTuple):
     quality: float
 
 def setup_device() -> str:
-    return "mps" if torch.backends.mps.is_available() else "cpu"
+    """Determine the most appropriate device for computation."""
+    if torch.backends.mps.is_available():
+        return "mps"
+    return "cuda" if torch.cuda.is_available() else "cpu"
 
 def ensure_weights() -> Path:
+    """Download pre-trained weights if not existing."""
     weights_path = Path("laion_weights.pth")
     if not weights_path.exists():
+        console.print("[yellow]Downloading aesthetic predictor weights...[/yellow]")
         url = "https://github.com/christophschuhmann/improved-aesthetic-predictor/raw/main/sac%2Blogos%2Bava1-l14-linearMSE.pth"
         urllib.request.urlretrieve(url, weights_path)
     return weights_path
 
 class FrameExtractor:
     def analyze_frame(self, frame: np.ndarray) -> float:
+        """Compute frame quality based on blur and luminance."""
         frame_size = 320
         frame = cv2.resize(frame, (frame_size, frame_size))
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
@@ -36,7 +54,13 @@ class FrameExtractor:
         luma_std = gray.std()
         return float(0.7 * blur_measure + 0.3 * luma_std)
 
-    def extract_best_frames(self, video_path: Path, window_sec: float = 1.0, picks_per_window: int = 1) -> pl.DataFrame:
+    def extract_best_frames(
+        self, 
+        video_path: Path, 
+        window_sec: float = 1.0, 
+        picks_per_window: int = 1
+    ) -> pl.DataFrame:
+        """Extract high-quality frames from video."""
         capture = cv2.VideoCapture(str(video_path))
         if not capture.isOpened():
             raise ValueError(f"Failed to open video file: {video_path}")
@@ -45,7 +69,13 @@ class FrameExtractor:
         frame_count = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
         window_frames = int(window_sec * fps)
 
-        with Progress(SpinnerColumn(), TextColumn("[progress.description]{task.description}"), BarColumn()) as progress:
+        with Progress(
+            SpinnerColumn(), 
+            TextColumn("[progress.description]{task.description}"), 
+            BarColumn(),
+            TimeElapsedColumn(),
+            TimeRemainingColumn()
+        ) as progress:
             task = progress.add_task("Extracting frames...", total=frame_count)
             frame_buffer = []
             best_frames = []
@@ -88,8 +118,8 @@ class FrameExtractor:
         ])
 
 class EmbeddingGenerator:
-    def __init__(self, device: str = setup_device()):
-        self.device = torch.device(device)
+    def __init__(self, device: Optional[str] = None):
+        self.device = torch.device(device or setup_device())
         model, _, self.preprocess = open_clip.create_model_and_transforms("ViT-L-14", pretrained="openai")
         self.model = model.to(self.device)
 
@@ -104,33 +134,60 @@ class EmbeddingGenerator:
             
         return Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
 
-    def generate_embeddings(self, video_path: Path, frame_indices: list[int], batch_size: int = 32) -> np.ndarray:
+    def generate_embeddings(
+        self, 
+        video_path: Path, 
+        frame_indices: list[int], 
+        batch_size: int = 256,
+    ) -> np.ndarray:
         embeddings = []
         
-        with torch.no_grad():
-            for i in range(0, len(frame_indices), batch_size):
-                batch_indices = frame_indices[i:i + batch_size]
-                batch_images = torch.stack([
-                    self.preprocess(self.extract_frame(video_path, idx))
-                    for idx in batch_indices
-                ]).to(self.device)
-                
-                batch_embeddings = self.model.encode_image(batch_images)
-                embeddings.append(batch_embeddings.cpu().numpy())
+        with Progress(
+            SpinnerColumn(), 
+            TextColumn("[progress.description]{task.description}"), 
+            BarColumn(),
+            TimeElapsedColumn(),
+            TimeRemainingColumn()
+        ) as progress:
+            task = progress.add_task("Generating embeddings...", total=len(frame_indices))
+            
+            with torch.no_grad():
+                for i in range(0, len(frame_indices), batch_size):
+                    batch_indices = frame_indices[i:i + batch_size]
+                    
+                    # Provide a hint about current progress
+                    console.print(
+                        f"[yellow]Processing batch {i//batch_size + 1}/{math.ceil(len(frame_indices)/batch_size)}: "
+                        f"{len(batch_indices)} frames[/yellow]"
+                    )
+                    
+                    try:
+                        batch_images = torch.stack([
+                            self.preprocess(self.extract_frame(video_path, idx))
+                            for idx in batch_indices
+                        ]).to(self.device)
+                        
+                        batch_embeddings = self.model.encode_image(batch_images)
+                        embeddings.append(batch_embeddings.cpu().numpy())
+                        
+                        progress.advance(task, len(batch_indices))
+                    
+                    except Exception as e:
+                        console.print(f"[bold red]Error processing batch: {e}[/bold red]")
+                        raise
 
         return np.vstack(embeddings)
 
 class SceneAnalyzer:
     def __init__(self):
         self.umap = umap.UMAP(
-            n_components=32,
+            n_components=7,
             n_neighbors=15,
             min_dist=0.1,
             metric='cosine',
             random_state=42
         )
         self.clusterer = hdbscan.HDBSCAN(
-            min_cluster_size=5,
             min_samples=3,
             cluster_selection_epsilon=0.5,
             prediction_data=True
@@ -147,27 +204,36 @@ class SceneAnalyzer:
         return cluster_labels.labels_, probabilities
 
     def find_exemplars(self, df: pl.DataFrame, embeddings: np.ndarray) -> pl.DataFrame:
-        centroids = {}
+        """Find representative frames for each cluster with similarity threshold."""
+        def find_cluster_exemplar(cluster_mask: np.ndarray) -> int:
+            cluster_embs = embeddings[cluster_mask]
+            centroid = cluster_embs.mean(axis=0)
+            
+            # Compute cosine similarities to find most representative frame
+            similarities = np.dot(cluster_embs, centroid) / (
+                np.linalg.norm(cluster_embs, axis=1) * np.linalg.norm(centroid)
+            )
+            
+            # Select frame with highest similarity as exemplar
+            return np.argmax(similarities)
+
+        # Track exemplars with high uniqueness
+        exemplars = []
         for cluster_id in df['cluster_id'].unique():
             if cluster_id < 0:
                 continue
-                
-            mask = df['cluster_id'] == cluster_id
-            cluster_embeddings = embeddings[mask.to_list()]
-            centroid = cluster_embeddings.mean(axis=0)
             
-            distances = np.linalg.norm(cluster_embeddings - centroid, axis=1)
-            exemplar_idx = distances.argmin()
-            
-            centroids[cluster_id] = mask.to_list().index(True) + exemplar_idx
-            
+            cluster_mask = (df['cluster_id'] == cluster_id).to_list()
+            exemplar_idx = find_cluster_exemplar(cluster_mask)
+            exemplars.append(cluster_mask.index(True) + exemplar_idx)
+        
         return df.with_columns(
-            pl.Series('is_exemplar', [i in centroids.values() for i in range(len(df))])
+            pl.Series('is_exemplar', [i in exemplars for i in range(len(df))])
         )
 
 class AestheticScorer:
-    def __init__(self, device: str = "mps" if torch.backends.mps.is_available() else "cpu"):
-        self.device = torch.device(device)
+    def __init__(self, device: Optional[str] = None):
+        self.device = torch.device(device or setup_device())
         model, _, _ = open_clip.create_model_and_transforms("ViT-L-14", pretrained="openai")
         self.model = model.to(self.device)
         self.fc = torch.nn.Linear(768, 1).to(self.device)
@@ -175,7 +241,6 @@ class AestheticScorer:
         weights_path = ensure_weights()
         weights = torch.load(weights_path, map_location=self.device)
         
-        # Map weights properly
         for k, v in weights.items():
             if "fc.weight" in k:
                 self.fc.weight.data = v
@@ -184,7 +249,11 @@ class AestheticScorer:
 
         self.fc.eval()
 
-    def score_exemplars(self, df: pl.DataFrame, exemplar_embeddings: np.ndarray) -> pl.DataFrame:
+    def score_exemplars(
+        self, 
+        df: pl.DataFrame, 
+        exemplar_embeddings: np.ndarray
+    ) -> pl.DataFrame:
         with torch.no_grad():
             embeddings = torch.from_numpy(exemplar_embeddings).to(self.device)
             scores = self.fc(embeddings).cpu().numpy().flatten()
@@ -205,15 +274,21 @@ def process_video(
     video_path: Path,
     window_sec: float = 1.0,
     picks_per_window: int = 1,
-    device: str = setup_device()
+    device: Optional[str] = None
 ) -> pl.DataFrame:
+    start_time = time()
+    console.print(f"[bold green]Processing video: {video_path}[/bold green]")
+    
     extractor = FrameExtractor()
     frame_df = extractor.extract_best_frames(video_path, window_sec, picks_per_window)
+    
+    total_frames = len(frame_df)
+    console.print(f"[yellow]Total frames processed: {total_frames}[/yellow]")
     
     embedding_gen = EmbeddingGenerator(device)
     embeddings = embedding_gen.generate_embeddings(
         video_path, 
-        frame_df["frame_idx"].to_list()
+        frame_df["frame_idx"].to_list(),
     )
     
     analyzer = SceneAnalyzer()
@@ -222,16 +297,17 @@ def process_video(
         frame_df["timestamp"].to_numpy()
     )
     
-    # Filter both DataFrame and embeddings together
     scene_df = frame_df.with_columns([
         pl.Series("cluster_id", cluster_labels).cast(pl.Int32),
         pl.Series("cluster_probability", probabilities.max(axis=1)).cast(pl.Float32)
     ])
-    mask = scene_df["cluster_id"] >= 0
-    scene_df = scene_df.filter(mask)
-    embeddings = embeddings[mask.to_list()]
-        
-    # Now lengths will match
+    
+    # Filter out noise points but keep all meaningful clusters
+    scene_df = scene_df.filter(pl.col("cluster_id") >= -1)
+    cluster_masks = scene_df['cluster_id'] >= 0
+    scene_df = scene_df.filter(cluster_masks)
+    embeddings = embeddings[cluster_masks.to_list()]
+    
     scene_df = analyzer.find_exemplars(scene_df, embeddings)
     
     scorer = AestheticScorer(device)
@@ -239,18 +315,31 @@ def process_video(
     exemplar_embeddings = embeddings[exemplar_mask]
     scene_df = scorer.score_exemplars(scene_df, exemplar_embeddings)
     
+    # Compute and display processing statistics
+    processing_time = time() - start_time
+    cluster_count = len(scene_df['cluster_id'].unique())
+    exemplar_count = len(scene_df.filter(pl.col("is_exemplar")))
+    
+    console.print(f"[bold green]Processed {len(scene_df)} frames across {cluster_count} clusters[/bold green]")
+    console.print(f"[bold yellow]Processing time: {processing_time:.2f} seconds[/bold yellow]")
+    console.print(f"[bold yellow]Exemplar frames: {exemplar_count}[/bold yellow]")
+    
     return scene_df
 
 def export_best_frames(
     video_path: Path,
     df: pl.DataFrame,
     output_dir: Path,
-    top_percentile: float = 10.0
+    top_percentile: float = 10.0,
+    min_export_count: int = 1
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     
     exemplar_count = len(df.filter(pl.col("is_exemplar")))
-    top_n = int(exemplar_count * top_percentile / 100)
+    top_n = max(
+        min_export_count, 
+        int(max(1, exemplar_count * top_percentile / 100))
+    )
     
     best_frames = (df
         .filter(pl.col("is_exemplar"))
@@ -258,20 +347,44 @@ def export_best_frames(
         .head(top_n)
     )
     
+    if len(best_frames) == 0:
+        # Fallback: export top frames by default if no exemplars found
+        best_frames = (df
+            .sort("cluster_probability", descending=True)
+            .head(top_n)
+        )
+    
     capture = cv2.VideoCapture(str(video_path))
     if not capture.isOpened():
         raise ValueError(f"Failed to open video file: {video_path}")
         
+    console.print(f"[bold yellow]Exporting top {top_n} frames to {output_dir}[/bold yellow]")
+    
+    exported_count = 0
+    scores = []
     for row in best_frames.iter_rows(named=True):
         capture.set(cv2.CAP_PROP_POS_FRAMES, row["frame_idx"])
         success, frame = capture.read()
         if not success:
             continue
             
-        output_path = output_dir / f"frame_{row['frame_idx']:06d}_{row['aesthetic_score']:.2f}.jpg"
+        # Truncate aesthetic score to 3 decimal places for filename
+        aesthetic_score = row.get('aesthetic_score', 0.0)
+        cluster_prob = row.get('cluster_probability', 0.0)
+        
+        output_path = output_dir / f"frame_{row['frame_idx']:06d}_a{aesthetic_score:.3f}_p{cluster_prob:.3f}.jpg"
         cv2.imwrite(str(output_path), frame, [cv2.IMWRITE_JPEG_QUALITY, 95])
         
+        scores.append(aesthetic_score)
+        exported_count += 1
+        
     capture.release()
+    
+    if exported_count == 0:
+        console.print("[bold red]No frames could be exported. Check video file.[/bold red]")
+    else:
+        console.print(f"[bold green]Exported {exported_count} frames successfully![/bold green]")
+        console.print(f"[yellow]Aesthetic Scores: min={min(scores):.3f}, max={max(scores):.3f}, avg={sum(scores)/len(scores):.3f}[/yellow]")
 
 if __name__ == "__main__":
     import typer
@@ -280,11 +393,12 @@ if __name__ == "__main__":
         video_path: Path = typer.Argument(..., help="Input video file"),
         window_sec: float = typer.Option(1.0, help="Analysis window in seconds"),
         picks_per_window: int = typer.Option(1, help="Frames to pick per window"),
-        device: str = typer.Option(setup_device(), help="Device for ML models"),
+        device: Optional[str] = typer.Option(None, help="Device for ML models"),
         top_percentile: float = typer.Option(10.0, help="Top percentage of exemplars to export"),
-        output_dir: Path = typer.Option(Path("output"), help="Output directory")
+        output_dir: Path = typer.Option(Path("output"), help="Output directory"),
+        min_export_count: int = typer.Option(1, help="Minimum number of frames to export")
     ) -> None:
         results = process_video(video_path, window_sec, picks_per_window, device)
-        export_best_frames(video_path, results, output_dir, top_percentile)
+        export_best_frames(video_path, results, output_dir, top_percentile, min_export_count)
     
     typer.run(main)
