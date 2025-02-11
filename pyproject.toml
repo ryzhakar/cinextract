@@ -1,3 +1,20 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.version]
+path = "cinematic_stills_extractor/__init__.py"
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/cinematic_stills_extractor",
+]
+[tool.hatch.build.targets.wheel]
+packages = [
+    "/cinematic_stills_extractor",
+]
+
+
 [project]
 name = "cinematic-frame-extraction"
 version = "0.1.0"
