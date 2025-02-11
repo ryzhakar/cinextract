@@ -1,6 +1,5 @@
 import itertools
 from collections.abc import Iterable
-import math
 import numpy as np
 import cv2
 import polars as pl
@@ -22,7 +21,6 @@ from rich.progress import (
     TimeRemainingColumn,
     TimeElapsedColumn,
 )
-
 
 FRAME_SIZE = 320
 
@@ -152,6 +150,17 @@ def extract_best_frames_from(
         how='horizontal',
     )
 
+def extract_specific_frame_from(
+    capture,
+    frame_idx: int,
+) -> Image.Image:
+    capture.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+    success, frame = capture.read()
+    if success:
+        return Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+    raise ValueError(f"Failed to extract frame {frame_idx}")
+
+
 class EmbeddingGenerator:
     def __init__(self, device: Optional[str] = None):
         self.device = torch.device(device or setup_device())
@@ -160,67 +169,65 @@ class EmbeddingGenerator:
         )
         self.model = model.to(self.device)
 
-    def extract_frame(self, video_path: Path, frame_idx: int) -> Image.Image:
-        capture = cv2.VideoCapture(str(video_path))
-        capture.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
-        success, frame = capture.read()
-        capture.release()
-
-        if not success:
-            raise ValueError(f"Failed to extract frame {frame_idx}")
-
-        return Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-
     def generate_embeddings(
         self,
-        video_path: Path,
-        frame_indices: list[int],
+        image_stream: Iterable[Image.Image],
+        *,
+        total_frames_count: int,
         batch_size: int = 256,
+        progress_keeper: Progress,
     ) -> np.ndarray:
+        stream = iter(image_stream)
         embeddings = []
-
-        with Progress(
-            SpinnerColumn(),
-            TextColumn("[progress.description]{task.description}"),
-            BarColumn(),
-            TimeElapsedColumn(),
-            TimeRemainingColumn(),
-        ) as progress:
-            task = progress.add_task(
-                "Generating embeddings...", total=len(frame_indices)
+        task = progress_keeper.add_task(
+            "Generating embeddings...",
+            total=total_frames_count,
+        )
+        def preprocess_batch_from(
+            stream: Iterable[Image.Image],
+        ) -> torch.Tensor:
+            return torch.stack(
+                [
+                    self.preprocess(frame)
+                    for frame in itertools.islice(stream, batch_size)
+                ]
             )
 
-            with torch.no_grad():
-                for i in range(0, len(frame_indices), batch_size):
-                    batch_indices = frame_indices[i : i + batch_size]
+        with torch.no_grad():
+            for _ in range(total_frames_count // batch_size + 1):
+                batch_embeddings = self.model.encode_image(preprocess_batch_from(stream).to(self.device))
+                embeddings.append(batch_embeddings.cpu().numpy())
 
-                    # Provide a hint about current progress
-                    console.print(
-                        f"[yellow]Processing batch {i // batch_size + 1}/{math.ceil(len(frame_indices) / batch_size)}: "
-                        f"{len(batch_indices)} frames[/yellow]"
-                    )
-
-                    try:
-                        batch_images = torch.stack(
-                            [
-                                self.preprocess(self.extract_frame(video_path, idx))
-                                for idx in batch_indices
-                            ]
-                        ).to(self.device)
-
-                        batch_embeddings = self.model.encode_image(batch_images)
-                        embeddings.append(batch_embeddings.cpu().numpy())
-
-                        progress.advance(task, len(batch_indices))
-
-                    except Exception as e:
-                        console.print(
-                            f"[bold red]Error processing batch: {e}[/bold red]"
-                        )
-                        raise
+                progress_keeper.advance(task, batch_size)
 
         return np.vstack(embeddings)
 
+def generate_embeddings_from(
+    video_path: Path,
+    *,
+    frame_df: pl.DataFrame,
+    progress_keeper: Progress,
+    device: str,
+) -> np.ndarray:
+    capture = cv2.VideoCapture(str(video_path))
+    if not capture.isOpened():
+        raise ValueError(f"Failed to open video file: {video_path}")
+
+    frame_indices = frame_df["frame_idx"].to_list()
+    image_stream = iter(
+        extract_specific_frame_from(
+            capture,
+            frame_idx=index,
+        )
+        for index in frame_indices
+    )
+    embeddings = EmbeddingGenerator(device).generate_embeddings(
+        image_stream,
+        total_frames_count=len(frame_indices),
+        progress_keeper=progress_keeper,
+    )
+    capture.release()
+    return embeddings
 
 class SceneAnalyzer:
     def __init__(self):
@@ -291,15 +298,18 @@ class SceneAnalyzer:
 
 
 class AestheticScorer:
-    def __init__(self, device: Optional[str] = None):
-        self.device = torch.device(device or setup_device())
+    def __init__(
+        self,
+        weights_path: Path,
+        device: str = setup_device(),
+    ):
+        self.device = torch.device(device)
         model, _, _ = open_clip.create_model_and_transforms(
             "ViT-L-14", pretrained="openai"
         )
         self.model = model.to(self.device)
         self.fc = torch.nn.Linear(768, 1).to(self.device)
 
-        weights_path = ensure_weights()
         weights = torch.load(weights_path, map_location=self.device)
 
         for k, v in weights.items():
@@ -323,11 +333,12 @@ class AestheticScorer:
 
 def process_video(
     video_path: Path,
+    *,
     window_sec: float = 2.0,
     picks_per_window: int = 2,
-    device: Optional[str] = None,
+    device: str = setup_device(),
+    console: Console,
 ) -> pl.DataFrame:
-    console = Console()
     start_time = time()
 
     console.print(f"[bold green]Processing video: {video_path}[/bold green]")
@@ -344,13 +355,13 @@ def process_video(
             picks_per_window=picks_per_window,
             progress_keeper=progress,
         )
-    total_frames = len(frame_df)
-    console.print(f"[yellow]Total frames processed: {total_frames}[/yellow]")
+        embeddings = generate_embeddings_from(
+            video_path,
+            frame_df=frame_df,
+            device=device,
+            progress_keeper=progress,
+        )
 
-    embedding_gen = EmbeddingGenerator(device)
-    embeddings = embedding_gen.generate_embeddings(
-        video_path, frame_df["frame_idx"].to_list()
-    )
 
     analyzer = SceneAnalyzer()
     cluster_labels, probabilities = analyzer.analyze_scenes(
@@ -373,7 +384,10 @@ def process_video(
     embeddings = embeddings[cluster_masks.to_list()]
 
     # Score ALL frames, not just exemplars
-    scorer = AestheticScorer(device)
+    scorer = AestheticScorer(
+        ensure_weights(console),
+        device=device,
+    )
     scene_df = scorer.score_exemplars(scene_df, embeddings)
 
     # Find exemplars that are close to cluster centroid AND have high aesthetic score
@@ -399,8 +413,10 @@ def export_best_frames(
     video_path: Path,
     df: pl.DataFrame,
     output_dir: Path,
+    *,
     top_percentile: float = 10.0,
     min_export_count: int = 10,
+    console: Console,
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -477,9 +493,21 @@ if __name__ == "__main__":
             1, help="Minimum number of frames to export"
         ),
     ) -> None:
-        results = process_video(video_path, window_sec, picks_per_window, device)
+        console = Console()
+        results = process_video(
+            video_path,
+            window_sec=window_sec,
+            picks_per_window=picks_per_window,
+            device=device or setup_device(),
+            console=console,
+        )
         export_best_frames(
-            video_path, results, output_dir, top_percentile, min_export_count
+            video_path,
+            results,
+            output_dir,
+            top_percentile=top_percentile,
+            min_export_count=min_export_count,
+            console=console,
         )
 
     typer.run(main)

@@ -20,3 +20,8 @@ dependencies = [
     "typer>=0.15.1",
     "umap-learn>=0.5.7",
 ]
+
+[dependency-groups]
+dev = [
+    "devtools>=0.12.2",
+]
