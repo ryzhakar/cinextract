@@ -204,9 +204,10 @@ class SceneAnalyzer:
         return cluster_labels.labels_, probabilities
 
     def find_exemplars(self, df: pl.DataFrame, embeddings: np.ndarray) -> pl.DataFrame:
-        """Find representative frames for each cluster with similarity threshold."""
-        def find_cluster_exemplar(cluster_mask: np.ndarray) -> int:
+        """Find representative frames for each cluster with combined similarity and aesthetic criteria."""
+        def find_cluster_exemplar(cluster_mask: np.ndarray, aesthetic_scores: np.ndarray) -> int:
             cluster_embs = embeddings[cluster_mask]
+            cluster_scores = aesthetic_scores[cluster_mask]
             centroid = cluster_embs.mean(axis=0)
             
             # Compute cosine similarities to find most representative frame
@@ -214,17 +215,25 @@ class SceneAnalyzer:
                 np.linalg.norm(cluster_embs, axis=1) * np.linalg.norm(centroid)
             )
             
-            # Select frame with highest similarity as exemplar
-            return np.argmax(similarities)
+            # Normalize aesthetic scores
+            normalized_scores = (cluster_scores - cluster_scores.min()) / (cluster_scores.max() - cluster_scores.min())
+            
+            # Combined score: balance between centroid proximity and aesthetic quality
+            combined_scores = 0.5 * similarities + 0.5 * normalized_scores
+            
+            # Select frame with highest combined score as exemplar
+            return np.argmax(combined_scores)
 
-        # Track exemplars with high uniqueness
+        # Track exemplars with high uniqueness and aesthetic value
         exemplars = []
+        aesthetic_scores = df['aesthetic_score'].to_numpy()
+        
         for cluster_id in df['cluster_id'].unique():
             if cluster_id < 0:
                 continue
             
             cluster_mask = (df['cluster_id'] == cluster_id).to_list()
-            exemplar_idx = find_cluster_exemplar(cluster_mask)
+            exemplar_idx = find_cluster_exemplar(cluster_mask, aesthetic_scores)
             exemplars.append(cluster_mask.index(True) + exemplar_idx)
         
         return df.with_columns(
@@ -252,21 +261,17 @@ class AestheticScorer:
     def score_exemplars(
         self, 
         df: pl.DataFrame, 
-        exemplar_embeddings: np.ndarray
+        embeddings: np.ndarray
     ) -> pl.DataFrame:
         with torch.no_grad():
-            embeddings = torch.from_numpy(exemplar_embeddings).to(self.device)
-            scores = self.fc(embeddings).cpu().numpy().flatten()
-            
-        exemplar_scores = dict(zip(
-            df.filter(pl.col("is_exemplar"))["frame_idx"].to_list(),
-            scores
-        ))
+            # Score ALL embeddings
+            full_embeddings = torch.from_numpy(embeddings).to(self.device)
+            all_scores = self.fc(full_embeddings).cpu().numpy().flatten()
         
         return df.with_columns(
             pl.Series(
                 'aesthetic_score',
-                [exemplar_scores.get(idx, 0.0) for idx in df["frame_idx"].to_list()]
+                all_scores
             ).cast(pl.Float32)
         )
 
@@ -288,7 +293,7 @@ def process_video(
     embedding_gen = EmbeddingGenerator(device)
     embeddings = embedding_gen.generate_embeddings(
         video_path, 
-        frame_df["frame_idx"].to_list(),
+        frame_df["frame_idx"].to_list()
     )
     
     analyzer = SceneAnalyzer()
@@ -308,12 +313,12 @@ def process_video(
     scene_df = scene_df.filter(cluster_masks)
     embeddings = embeddings[cluster_masks.to_list()]
     
-    scene_df = analyzer.find_exemplars(scene_df, embeddings)
-    
+    # Score ALL frames, not just exemplars
     scorer = AestheticScorer(device)
-    exemplar_mask = scene_df["is_exemplar"].to_list()
-    exemplar_embeddings = embeddings[exemplar_mask]
-    scene_df = scorer.score_exemplars(scene_df, exemplar_embeddings)
+    scene_df = scorer.score_exemplars(scene_df, embeddings)
+    
+    # Find exemplars that are close to cluster centroid AND have high aesthetic score
+    scene_df = analyzer.find_exemplars(scene_df, embeddings)
     
     # Compute and display processing statistics
     processing_time = time() - start_time
