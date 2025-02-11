@@ -1,3 +1,5 @@
+import itertools
+from collections.abc import Iterable
 import math
 import numpy as np
 import cv2
@@ -21,7 +23,15 @@ from rich.progress import (
     TimeElapsedColumn,
 )
 
-console = Console()
+
+FRAME_SIZE = 320
+
+AESTHETIC_PREDICTOR_WEIGHTS_PATH = Path("laion_weights.pth")
+AESTHETIC_PREDICTOR_WEIGHTS_URL = (
+    "https://github.com/christophschuhmann/"
+    "improved-aesthetic-predictor/raw/main/"
+    "sac%2Blogos%2Bava1-l14-linearMSE.pth"
+)
 
 
 class Frame(NamedTuple):
@@ -34,96 +44,113 @@ def setup_device() -> str:
     """Determine the most appropriate device for computation."""
     if torch.backends.mps.is_available():
         return "mps"
-    return "cuda" if torch.cuda.is_available() else "cpu"
+    if torch.cuda.is_available():
+        return "cuda"
+    return "cpu"
 
 
-def ensure_weights() -> Path:
+def ensure_weights(console: Console) -> Path:
     """Download pre-trained weights if not existing."""
-    weights_path = Path("laion_weights.pth")
-    if not weights_path.exists():
-        console.print("[yellow]Downloading aesthetic predictor weights...[/yellow]")
-        url = "https://github.com/christophschuhmann/improved-aesthetic-predictor/raw/main/sac%2Blogos%2Bava1-l14-linearMSE.pth"
-        urllib.request.urlretrieve(url, weights_path)
-    return weights_path
-
-
-class FrameExtractor:
-    def analyze_frame(self, frame: np.ndarray) -> float:
-        """Compute frame quality based on blur and luminance."""
-        frame_size = 320
-        frame = cv2.resize(frame, (frame_size, frame_size))
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-
-        blur_measure = cv2.Laplacian(gray, cv2.CV_64F).var()
-        luma_std = gray.std()
-        return float(0.7 * blur_measure + 0.3 * luma_std)
-
-    def extract_best_frames(
-        self, video_path: Path, window_sec: float = 1.0, picks_per_window: int = 1
-    ) -> pl.DataFrame:
-        """Extract high-quality frames from video."""
-        capture = cv2.VideoCapture(str(video_path))
-        if not capture.isOpened():
-            raise ValueError(f"Failed to open video file: {video_path}")
-
-        fps = capture.get(cv2.CAP_PROP_FPS)
-        frame_count = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
-        window_frames = int(window_sec * fps)
-
-        with Progress(
-            SpinnerColumn(),
-            TextColumn("[progress.description]{task.description}"),
-            BarColumn(),
-            TimeElapsedColumn(),
-            TimeRemainingColumn(),
-        ) as progress:
-            task = progress.add_task("Extracting frames...", total=frame_count)
-            frame_buffer = []
-            best_frames = []
-
-            for frame_idx in range(frame_count):
-                success, frame = capture.read()
-                if not success:
-                    break
-
-                quality = self.analyze_frame(frame)
-                frame_buffer.append(
-                    Frame(index=frame_idx, timestamp=frame_idx / fps, quality=quality)
-                )
-
-                if len(frame_buffer) >= window_frames:
-                    best_frames.extend(
-                        sorted(frame_buffer, key=lambda x: x.quality, reverse=True)[
-                            :picks_per_window
-                        ]
-                    )
-                    frame_buffer.clear()
-
-                progress.advance(task)
-
-            if frame_buffer:
-                best_frames.extend(
-                    sorted(frame_buffer, key=lambda x: x.quality, reverse=True)[
-                        :picks_per_window
-                    ]
-                )
-
-        capture.release()
-
-        return pl.DataFrame(
-            {
-                "frame_idx": [f.index for f in best_frames],
-                "timestamp": [f.timestamp for f in best_frames],
-                "quality_score": [f.quality for f in best_frames],
-            }
-        ).with_columns(
-            [
-                pl.col("frame_idx").cast(pl.Int32),
-                pl.col("timestamp").cast(pl.Float32),
-                pl.col("quality_score").cast(pl.Float32),
-            ]
+    if not AESTHETIC_PREDICTOR_WEIGHTS_PATH.exists():
+        console.print(
+            "[yellow]Downloading aesthetic predictor weights...[/yellow]",
         )
+        urllib.request.urlretrieve(
+            AESTHETIC_PREDICTOR_WEIGHTS_URL,
+            AESTHETIC_PREDICTOR_WEIGHTS_PATH,
+        )
+    return AESTHETIC_PREDICTOR_WEIGHTS_PATH
 
+
+def frame_quality_from(frame: np.ndarray) -> float:
+    """Compute frame quality based on blur and luminance."""
+    frame = cv2.resize(frame, (FRAME_SIZE, FRAME_SIZE))
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
+    blur_measure = cv2.Laplacian(gray, cv2.CV_64F).var()
+    luma_std = gray.std()
+    return float(0.7 * blur_measure + 0.3 * luma_std)
+
+def extract_best_frames_from(
+    video_path: Path,
+    *,
+    window_sec: float = 2.0,
+    picks_per_window: int = 2,
+    progress_keeper: Progress,
+) -> pl.DataFrame:
+    capture = cv2.VideoCapture(str(video_path))
+    if not capture.isOpened():
+        raise ValueError(f"Failed to open video file: {video_path}")
+
+    def take_frames_from(
+        capture,
+        *,
+        f_number: int,
+        offset: int,
+    ) -> Iterable[tuple[int, np.ndarray]]:
+        for count in range(f_number):
+            success, frame = capture.read()
+            if not success:
+                continue
+            idx = offset + count
+            yield idx, frame
+
+    fps = capture.get(cv2.CAP_PROP_FPS)
+    frame_count = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
+    window_frames = int(window_sec * fps)
+    task = progress_keeper.add_task("Extracting frames...", total=frame_count)
+
+    frame_keeper: list[list[Frame]] = []
+    offset = 0
+    while offset < frame_count:
+        window = take_frames_from(
+            capture,
+            f_number=window_frames,
+            offset=offset,
+        )
+        frames = (
+            Frame(
+                index=idx,
+                timestamp=idx / fps,
+                quality=frame_quality_from(frame)
+            )
+            for idx, frame in window
+        )
+        top_frames = sorted(frames, key=lambda x: x.quality)
+        if top_frames:
+            start_index = min(
+                picks_per_window,
+                len(top_frames),
+            )
+
+            frame_keeper.append(top_frames[-start_index:])
+        progress_keeper.advance(task, advance=window_frames)
+        offset += window_frames
+
+    frame_idx, timestamps, quality_scores = zip(*itertools.chain.from_iterable(frame_keeper))
+
+    capture.release()
+    progress_keeper.update(task, completed=True)
+    return pl.concat(
+        (
+            pl.Series(
+                'frame_idx',
+                frame_idx,
+                dtype=pl.Int32,
+            ).to_frame(),
+            pl.Series(
+                'timestamp',
+                timestamps,
+                dtype=pl.Float32,
+            ).to_frame(),
+            pl.Series(
+                'quality_score',
+                quality_scores,
+                dtype=pl.Float32,
+            ).to_frame(),
+        ),
+        how='horizontal',
+    )
 
 class EmbeddingGenerator:
     def __init__(self, device: Optional[str] = None):
@@ -300,12 +327,23 @@ def process_video(
     picks_per_window: int = 2,
     device: Optional[str] = None,
 ) -> pl.DataFrame:
+    console = Console()
     start_time = time()
+
     console.print(f"[bold green]Processing video: {video_path}[/bold green]")
-
-    extractor = FrameExtractor()
-    frame_df = extractor.extract_best_frames(video_path, window_sec, picks_per_window)
-
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TimeElapsedColumn(),
+        TimeRemainingColumn(compact=True),
+    ) as progress:
+        frame_df = extract_best_frames_from(
+            video_path,
+            window_sec=window_sec,
+            picks_per_window=picks_per_window,
+            progress_keeper=progress,
+        )
     total_frames = len(frame_df)
     console.print(f"[yellow]Total frames processed: {total_frames}[/yellow]")
 
