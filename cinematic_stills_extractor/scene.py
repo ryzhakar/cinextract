@@ -9,11 +9,14 @@ class SceneAnalyzer:
         self.umap = umap.UMAP(
             n_components=7,
             n_neighbors=15,
-            min_dist=0.1,
-            metric="euclidian",
+            min_dist=0.05,
+            metric="euclidean",
+            set_op_mix_ratio=0.618,
         )
         self.clusterer = hdbscan.HDBSCAN(
-            min_samples=3, cluster_selection_epsilon=0.5, prediction_data=True
+            min_samples=3,
+            cluster_selection_epsilon=0.2,
+            prediction_data=True
         )
 
     def analyze_scenes(
@@ -49,7 +52,7 @@ class SceneAnalyzer:
             )
 
             # Combined score: balance between centroid proximity and aesthetic quality
-            combined_scores = 0.5 * similarities + 0.5 * normalized_scores
+            combined_scores = 0.3 * similarities + 0.7 * normalized_scores
 
             # Select frame with highest combined score as exemplar
             return np.argmax(combined_scores)
