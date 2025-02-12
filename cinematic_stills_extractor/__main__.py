@@ -38,7 +38,8 @@ def process_video(
     *,
     window_sec: float = 2.0,
     picks_per_window: int = 2,
-    device: str = setup_device(),
+    device: str,
+    embedding_batch_size: int,
     console: Console,
 ) -> pl.DataFrame:
     start_time = time()
@@ -62,6 +63,7 @@ def process_video(
             frame_df=frame_df,
             device=device,
             progress_keeper=progress,
+            batch_size=embedding_batch_size,
         )
 
     analyzer = SceneAnalyzer()
@@ -71,9 +73,11 @@ def process_video(
 
     scene_df = frame_df.with_columns(
         [
-            pl.Series("cluster_id", cluster_labels).cast(pl.Int32),
-            pl.Series("cluster_probability", probabilities.max(axis=1)).cast(
-                pl.Float32
+            pl.Series("cluster_id", cluster_labels, dtype=pl.Int32),
+            pl.Series(
+                "cluster_probability",
+                probabilities.max(axis=1),
+                dtype=pl.Float32,
             ),
         ]
     )
@@ -180,14 +184,15 @@ def export_best_frames(
 
 def main(
     video_path: Path = typer.Argument(..., help="Input video file"),
-    window_sec: float = typer.Option(2.0, help="Analysis window in seconds"),
-    picks_per_window: int = typer.Option(2, help="Frames to pick per window"),
+    window_sec: float = typer.Option(5.0, help="Analysis window in seconds"),
+    picks_per_window: int = typer.Option(5, help="Frames to pick per window"),
     device: str = typer.Option(setup_device(), help="Device for ML models"),
     top_percentile: float = typer.Option(
-        10.0, help="Top percentage of exemplars to export"
+        20.0, help="Top percentage of exemplars to export"
     ),
     output_dir: Path = typer.Option(Path("output"), help="Output directory"),
-    min_export_count: int = typer.Option(1, help="Minimum number of frames to export"),
+    min_export_count: int = typer.Option(10, help="Minimum number of frames to export"),
+    embedding_batch_size: int = 256,
 ) -> None:
     console = Console()
     results = process_video(
@@ -196,6 +201,7 @@ def main(
         picks_per_window=picks_per_window,
         device=device or setup_device(),
         console=console,
+        embedding_batch_size=embedding_batch_size,
     )
     export_best_frames(
         video_path,

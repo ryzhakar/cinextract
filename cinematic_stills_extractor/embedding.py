@@ -73,6 +73,7 @@ def generate_embeddings_from(
     *,
     frame_df: pl.DataFrame,
     progress_keeper: Progress,
+    batch_size: int,
     device: str,
 ) -> np.ndarray:
     capture = cv2.VideoCapture(str(video_path))
@@ -91,6 +92,7 @@ def generate_embeddings_from(
         image_stream,
         total_frames_count=len(frame_indices),
         progress_keeper=progress_keeper,
+        batch_size=batch_size,
     )
     capture.release()
     return embeddings
