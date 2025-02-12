@@ -51,12 +51,9 @@ class AestheticScorer:
 
         self.fc.eval()
 
-    def score_exemplars(self, df: pl.DataFrame, embeddings: np.ndarray) -> pl.DataFrame:
+    def score(self, embeddings: np.ndarray) -> pl.Series:
         with torch.no_grad():
-            # Score ALL embeddings
             full_embeddings = torch.from_numpy(embeddings).to(self.device)
             all_scores = self.fc(full_embeddings).cpu().numpy().flatten()
 
-        return df.with_columns(
-            pl.Series("aesthetic_score", all_scores).cast(pl.Float32)
-        )
+        return pl.Series("aesthetic_score", all_scores, dtype=pl.Float32)

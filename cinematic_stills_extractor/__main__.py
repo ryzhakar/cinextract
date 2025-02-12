@@ -37,7 +37,7 @@ def process_video(
     video_path: Path,
     *,
     window_sec: float = 2.0,
-    picks_per_window: int = 2,
+    consideration_treshold: float = 0.5,
     device: str,
     embedding_batch_size: int,
     console: Console,
@@ -55,7 +55,7 @@ def process_video(
         frame_df = extract_best_frames_from(
             video_path,
             window_sec=window_sec,
-            picks_per_window=picks_per_window,
+            consideration_treshold=consideration_treshold,
             progress_keeper=progress,
         )
         embeddings = generate_embeddings_from(
@@ -66,42 +66,23 @@ def process_video(
             batch_size=embedding_batch_size,
         )
 
-    analyzer = SceneAnalyzer()
-    cluster_labels, probabilities = analyzer.analyze_scenes(
-        embeddings, frame_df["timestamp"].to_numpy()
+    cluster_labels, probabilities = SceneAnalyzer().analyze_scenes(
+        embeddings, frame_df["frame_idx"].to_numpy()
     )
-
-    scene_df = frame_df.with_columns(
-        [
-            pl.Series("cluster_id", cluster_labels, dtype=pl.Int32),
-            pl.Series(
-                "cluster_probability",
-                probabilities.max(axis=1),
-                dtype=pl.Float32,
-            ),
-        ]
+    ae_scores = AestheticScorer(ensure_weights(console), device=device).score(embeddings)
+    scene_df = pl.concat(
+        (
+            frame_df,
+            ae_scores.to_frame(),
+            cluster_labels.to_frame(),
+            probabilities.to_frame(),
+        ),
+        how='horizontal',
     )
-
-    # Filter out noise points but keep all meaningful clusters
-    scene_df = scene_df.filter(pl.col("cluster_id") >= -1)
-    cluster_masks = scene_df["cluster_id"] >= 0
-    scene_df = scene_df.filter(cluster_masks)
-    embeddings = embeddings[cluster_masks.to_list()]
-
-    # Score ALL frames, not just exemplars
-    scorer = AestheticScorer(
-        ensure_weights(console),
-        device=device,
-    )
-    scene_df = scorer.score_exemplars(scene_df, embeddings)
-
-    # Find exemplars that are close to cluster centroid AND have high aesthetic score
-    scene_df = analyzer.find_exemplars(scene_df, embeddings)
 
     # Compute and display processing statistics
     processing_time = time() - start_time
-    cluster_count = len(scene_df["cluster_id"].unique())
-    exemplar_count = len(scene_df.filter(pl.col("is_exemplar")))
+    cluster_count = len(scene_df["cluster_id"].unique() - 1)
 
     console.print(
         f"[bold green]Processed {len(scene_df)} frames across {cluster_count} clusters[/bold green]"
@@ -109,7 +90,6 @@ def process_video(
     console.print(
         f"[bold yellow]Processing time: {processing_time:.2f} seconds[/bold yellow]"
     )
-    console.print(f"[bold yellow]Exemplar frames: {exemplar_count}[/bold yellow]")
 
     return scene_df
 
@@ -124,71 +104,57 @@ def export_best_frames(
     console: Console,
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
-
-    exemplar_count = len(df.filter(pl.col("is_exemplar")))
-    top_n = max(min_export_count, int(max(1, exemplar_count * top_percentile / 100)))
-
+    
     best_frames = (
-        df.filter(pl.col("is_exemplar"))
+        df.filter(pl.col("cluster_id") >= 0)
+        .group_by("cluster_id")
+        .agg(
+            pl.all().first(),
+            prob_threshold=pl.col("cluster_probability").quantile(0.2),
+        )
+        .filter(pl.col("cluster_probability") >= pl.col("prob_threshold"))
+        .sort(["cluster_id", "aesthetic_score"], descending=[False, True])
+        .group_by("cluster_id", maintain_order=True)
+        .first()
         .sort("aesthetic_score", descending=True)
-        .head(top_n)
+        .head(max(min_export_count, int(len(df["cluster_id"].unique()) * top_percentile / 100)))
     )
-
-    if len(best_frames) == 0:
-        # Fallback: export top frames by default if no exemplars found
-        best_frames = df.sort("cluster_probability", descending=True).head(top_n)
 
     capture = cv2.VideoCapture(str(video_path))
     if not capture.isOpened():
         raise ValueError(f"Failed to open video file: {video_path}")
 
     console.print(
-        f"[bold yellow]Exporting top {top_n} frames to {output_dir}[/bold yellow]"
+        f"[bold yellow]Exporting {len(best_frames)} frames to {output_dir}[/bold yellow]"
     )
 
-    exported_count = 0
-    scores = []
-    for row in best_frames.iter_rows(named=True):
-        capture.set(cv2.CAP_PROP_POS_FRAMES, row["frame_idx"])
+    for frame_data in best_frames.iter_rows(named=True):
+        capture.set(cv2.CAP_PROP_POS_FRAMES, frame_data["frame_idx"])
         success, frame = capture.read()
         if not success:
             continue
 
-        # Truncate aesthetic score to 3 decimal places for filename
-        aesthetic_score = row.get("aesthetic_score", 0.0)
-        cluster_prob = row.get("cluster_probability", 0.0)
-
         output_path = (
             output_dir
-            / f"frame_{row['frame_idx']:06d}_a{aesthetic_score:.3f}_p{cluster_prob:.3f}.jpg"
+            / f"frame_{frame_data['frame_idx']:06d}_c{frame_data['cluster_id']}_a{frame_data['aesthetic_score']:.3f}.jpg"
         )
         cv2.imwrite(str(output_path), frame, [cv2.IMWRITE_JPEG_QUALITY, 95])
 
-        scores.append(aesthetic_score)
-        exported_count += 1
-
     capture.release()
 
-    if exported_count == 0:
-        console.print(
-            "[bold red]No frames could be exported. Check video file.[/bold red]"
-        )
-    else:
-        console.print(
-            f"[bold green]Exported {exported_count} frames successfully![/bold green]"
-        )
-        console.print(
-            f"[yellow]Aesthetic Scores: min={min(scores):.3f}, max={max(scores):.3f}, avg={sum(scores) / len(scores):.3f}[/yellow]"
-        )
+    console.print(
+        f"[bold green]Exported {len(best_frames)} frames from {len(best_frames['cluster_id'].unique())} clusters[/bold green]\n"
+        f"[yellow]Aesthetic Scores: {best_frames['aesthetic_score'].describe()}[/yellow]"
+    )
 
 
 def main(
     video_path: Path = typer.Argument(..., help="Input video file"),
-    window_sec: float = typer.Option(5.0, help="Analysis window in seconds"),
-    picks_per_window: int = typer.Option(5, help="Frames to pick per window"),
+    window_sec: float = typer.Option(3.0, help="Analysis window in seconds"),
+    consideration_treshold: float = typer.Option(0.1, help="Portion of frames to pick per window"),
     device: str = typer.Option(setup_device(), help="Device for ML models"),
     top_percentile: float = typer.Option(
-        20.0, help="Top percentage of exemplars to export"
+        10.0, help="Top percentage of exemplars to export"
     ),
     output_dir: Path = typer.Option(Path("output"), help="Output directory"),
     min_export_count: int = typer.Option(10, help="Minimum number of frames to export"),
@@ -198,7 +164,7 @@ def main(
     results = process_video(
         video_path,
         window_sec=window_sec,
-        picks_per_window=picks_per_window,
+        consideration_treshold=consideration_treshold,
         device=device or setup_device(),
         console=console,
         embedding_batch_size=embedding_batch_size,
