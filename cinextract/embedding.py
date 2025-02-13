@@ -10,6 +10,7 @@ import numpy as np
 from rich.progress import (
     Progress,
 )
+from cinextract.cache import get_cache_path_from
 
 
 def extract_specific_frame_from(
@@ -76,11 +77,20 @@ def generate_embeddings_from(
     batch_size: int,
     device: str,
 ) -> np.ndarray:
+    frame_indices = frame_df["frame_idx"].to_list()
+    cache_path = get_cache_path_from(
+        video_path,
+        step='generate_embeddings_from',
+        frame_indices=frame_indices,
+        extension='.parquet'
+    )
+    if cache_path.exists():
+        return pl.read_parquet(cache_path, glob=False).to_numpy()
+
     capture = cv2.VideoCapture(str(video_path))
     if not capture.isOpened():
         raise ValueError(f"Failed to open video file: {video_path}")
 
-    frame_indices = frame_df["frame_idx"].to_list()
     image_stream = iter(
         extract_specific_frame_from(
             capture,
@@ -95,4 +105,5 @@ def generate_embeddings_from(
         batch_size=batch_size,
     )
     capture.release()
+    pl.DataFrame(embeddings).write_parquet(cache_path)
     return embeddings

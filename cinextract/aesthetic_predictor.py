@@ -6,8 +6,9 @@ import open_clip
 
 import urllib.request
 from rich.console import Console
+from cinextract.cache import CACHE_DIR
 
-AESTHETIC_PREDICTOR_WEIGHTS_PATH = Path("laion_weights.pth")
+AESTHETIC_PREDICTOR_WEIGHTS_PATH = CACHE_DIR / 'laion_weights.pth'
 AESTHETIC_PREDICTOR_WEIGHTS_URL = (
     "https://github.com/christophschuhmann/"
     "improved-aesthetic-predictor/raw/main/"
@@ -18,6 +19,9 @@ AESTHETIC_PREDICTOR_WEIGHTS_URL = (
 def ensure_weights(console: Console) -> Path:
     """Download pre-trained weights if not existing."""
     if not AESTHETIC_PREDICTOR_WEIGHTS_PATH.exists():
+        weights_dir = AESTHETIC_PREDICTOR_WEIGHTS_PATH.parent
+        weights_dir.mkdir(parents=True, exist_ok=True)
+
         console.print(
             "[yellow]Downloading aesthetic predictor weights...[/yellow]",
         )

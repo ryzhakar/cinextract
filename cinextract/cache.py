@@ -1,3 +1,4 @@
+from collections.abc import Sequence, Mapping
 from pathlib import Path
 import hashlib
 import json
@@ -9,7 +10,7 @@ CACHE_DIR = Path("~/.cache/cinextract").expanduser()
 def get_cache_path_from(
     namesake: Path,
     extension: str = "",
-    **invalidating_options: str | int | float,
+    **invalidating_options: Mapping | Sequence | str | int | float,
 ) -> Path:
     """Create a cache path based on a related path and arbitrary arguments."""
     options_str = json.dumps(
