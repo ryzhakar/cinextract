@@ -1,4 +1,4 @@
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 from cinextract.scene import SceneAnalyzer
 from cinextract.still_frames import extract_best_frames_from
