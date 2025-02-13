@@ -95,8 +95,7 @@ wheels = [
 ]
 
 [[package]]
-name = "cinematic-frame-extraction"
-version = "0.1.0"
+name = "cinextract"
 source = { editable = "." }
 dependencies = [
     { name = "hdbscan" },
@@ -117,13 +116,14 @@ dependencies = [
     { name = "umap-learn" },
 ]
 
-[package.dev-dependencies]
+[package.optional-dependencies]
 dev = [
     { name = "devtools" },
 ]
 
 [package.metadata]
 requires-dist = [
+    { name = "devtools", marker = "extra == 'dev'", specifier = ">=0.12.2" },
     { name = "hdbscan", specifier = ">=0.8.40" },
     { name = "numba", specifier = ">=0.57.1" },
     { name = "numpy", specifier = ">=1.24.4" },
@@ -139,9 +139,6 @@ requires-dist = [
     { name = "typer", specifier = ">=0.15.1" },
     { name = "umap-learn", specifier = ">=0.5.7" },
 ]
-
-[package.metadata.requires-dev]
-dev = [{ name = "devtools", specifier = ">=0.12.2" }]
 
 [[package]]
 name = "click"

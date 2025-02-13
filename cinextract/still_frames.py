@@ -6,6 +6,7 @@ import cv2
 import polars as pl
 from dataclasses import dataclass
 import numpy as np
+from cinextract.cache import get_cache_path_from
 
 FRAME_SIZE = 320
 
@@ -219,6 +220,14 @@ def process_video_frames(
     progress_keeper: Progress,
 ) -> pl.DataFrame:
     """Extract and quality-score frames"""
+    cache_path = get_cache_path_from(
+        video_path,
+        step='process_video_frames',
+        extension='.parquet'
+    )
+    if cache_path.exists():
+        return pl.read_parquet(cache_path, glob=False)
+
     capture = cv2.VideoCapture(str(video_path))
     if not capture.isOpened():
         raise ValueError(f"Failed to open video file: {video_path}")
@@ -242,7 +251,9 @@ def process_video_frames(
     capture.release()
     progress_keeper.update(task, completed=True)
 
-    return pl.DataFrame(frames_data)
+    frame_qualities = pl.DataFrame(frames_data)
+    frame_qualities.write_parquet(cache_path)
+    return frame_qualities
 
 
 def extract_best_frames_from(
@@ -253,6 +264,16 @@ def extract_best_frames_from(
     progress_keeper: Progress,
 ) -> pl.DataFrame:
     """Legacy interface wrapper"""
+    cache_path = get_cache_path_from(
+        video_path,
+        step='extract_best_frames_from',
+        window_sec=window_sec,
+        patience_factor=patience_factor,
+        extension='.parquet'
+    )
+    if cache_path.exists():
+        return pl.read_parquet(cache_path, glob=False)
+
     PHI = 1.618
     frames_df = process_video_frames(video_path, progress_keeper)
 
@@ -264,5 +285,8 @@ def extract_best_frames_from(
         max_gap=int(window_size * (PHI**patience_factor)),
     )
 
-    selected = select_frames(frames_df, config)
-    return selected[["frame_idx", "quality"]].rename({"quality": "quality_score"})
+    best_frames = select_frames(
+        frames_df, config
+    )[["frame_idx", "quality"]].rename({"quality": "quality_score"})
+    best_frames.write_parquet(cache_path)
+    return best_frames
