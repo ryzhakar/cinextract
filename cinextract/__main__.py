@@ -15,10 +15,10 @@ from rich.progress import (
 import typer
 
 
-from cinematic_stills_extractor.scene import SceneAnalyzer
-from cinematic_stills_extractor.still_frames import extract_best_frames_from
-from cinematic_stills_extractor.embedding import generate_embeddings_from
-from cinematic_stills_extractor.aesthetic_predictor import (
+from cinextract.scene import SceneAnalyzer
+from cinextract.still_frames import extract_best_frames_from
+from cinextract.embedding import generate_embeddings_from
+from cinextract.aesthetic_predictor import (
     AestheticScorer,
     ensure_weights,
 )
