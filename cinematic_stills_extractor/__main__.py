@@ -37,10 +37,10 @@ def process_video(
     video_path: Path,
     *,
     window_sec: float = 2.0,
-    consideration_treshold: float = 0.5,
     device: str,
     embedding_batch_size: int,
     console: Console,
+    patience_factor: int,
 ) -> pl.DataFrame:
     start_time = time()
 
@@ -55,8 +55,8 @@ def process_video(
         frame_df = extract_best_frames_from(
             video_path,
             window_sec=window_sec,
-            consideration_treshold=consideration_treshold,
             progress_keeper=progress,
+            patience_factor=patience_factor,
         )
         embeddings = generate_embeddings_from(
             video_path,
@@ -150,24 +150,26 @@ def export_best_frames(
 
 def main(
     video_path: Path = typer.Argument(..., help="Input video file"),
-    window_sec: float = typer.Option(3.0, help="Analysis window in seconds"),
-    consideration_treshold: float = typer.Option(0.1, help="Portion of frames to pick per window"),
+    output_dir: Path = typer.Option(Path("output"), help="Output directory"),
+
     device: str = typer.Option(setup_device(), help="Device for ML models"),
     top_percentile: float = typer.Option(
-        10.0, help="Top percentage of exemplars to export"
+        10.0, help="Top percentage of frames to export"
     ),
-    output_dir: Path = typer.Option(Path("output"), help="Output directory"),
     min_export_count: int = typer.Option(10, help="Minimum number of frames to export"),
+
+    window_sec: float = typer.Option(2.0, help="Analysis window in seconds"),
     embedding_batch_size: int = 256,
+    patience_factor: int = 4,
 ) -> None:
     console = Console()
     results = process_video(
         video_path,
         window_sec=window_sec,
-        consideration_treshold=consideration_treshold,
         device=device or setup_device(),
         console=console,
         embedding_batch_size=embedding_batch_size,
+        patience_factor=patience_factor,
     )
     export_best_frames(
         video_path,
