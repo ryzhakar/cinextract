@@ -14,6 +14,7 @@ from rich.progress import (
 )
 import typer
 
+app = typer.Typer()
 
 from cinextract.scene import SceneAnalyzer
 from cinextract.still_frames import extract_best_frames_from
@@ -155,6 +156,7 @@ def export_best_frames(
     )
 
 
+@app.command()
 def main(
     video_path: Path = typer.Argument(..., help="Input video file"),
     output_dir: Path = typer.Option(Path("output"), help="Output directory"),
@@ -186,4 +188,5 @@ def main(
     )
 
 
-typer.run(main)
+if __name__ == '__main__':
+    app()
