@@ -69,7 +69,9 @@ def process_video(
     cluster_labels, probabilities = SceneAnalyzer().analyze_scenes(
         embeddings, frame_df["frame_idx"].to_numpy()
     )
-    ae_scores = AestheticScorer(ensure_weights(console), device=device).score(embeddings)
+    ae_scores = AestheticScorer(ensure_weights(console), device=device).score(
+        embeddings
+    )
     scene_df = pl.concat(
         (
             frame_df,
@@ -77,7 +79,7 @@ def process_video(
             cluster_labels.to_frame(),
             probabilities.to_frame(),
         ),
-        how='horizontal',
+        how="horizontal",
     )
 
     # Compute and display processing statistics
@@ -104,7 +106,7 @@ def export_best_frames(
     console: Console,
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
-    
+
     best_frames = (
         df.filter(pl.col("cluster_id") >= 0)
         .group_by("cluster_id")
@@ -117,7 +119,12 @@ def export_best_frames(
         .group_by("cluster_id", maintain_order=True)
         .first()
         .sort("aesthetic_score", descending=True)
-        .head(max(min_export_count, int(len(df["cluster_id"].unique()) * top_percentile / 100)))
+        .head(
+            max(
+                min_export_count,
+                int(len(df["cluster_id"].unique()) * top_percentile / 100),
+            )
+        )
     )
 
     capture = cv2.VideoCapture(str(video_path))
@@ -151,13 +158,11 @@ def export_best_frames(
 def main(
     video_path: Path = typer.Argument(..., help="Input video file"),
     output_dir: Path = typer.Option(Path("output"), help="Output directory"),
-
     device: str = typer.Option(setup_device(), help="Device for ML models"),
     top_percentile: float = typer.Option(
         10.0, help="Top percentage of frames to export"
     ),
     min_export_count: int = typer.Option(10, help="Minimum number of frames to export"),
-
     window_sec: float = typer.Option(2.0, help="Analysis window in seconds"),
     embedding_batch_size: int = 256,
     patience_factor: int = 4,
