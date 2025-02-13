@@ -2,25 +2,25 @@
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
-[tool.hatch.version]
-path = "cinextract/__init__.py"
-
-[tool.hatch.build.targets.sdist]
-include = [
-    "/cinextract",
-]
-[tool.hatch.build.targets.wheel]
-packages = [
-    "/cinextract",
-]
-
-
 [project]
-name = "cinematic-frame-extraction"
-version = "0.1.0"
-description = "Add your description here"
+name = "cinextract"
+dynamic = ["version"]
+description = "High-performance cinematic frame extraction tool leveraging deep learning"
 readme = "README.md"
 requires-python = ">=3.10"
+license = "AGPL-3.0-or-later"
+authors = [
+    { name = "Arthur Ryzhak", email = "ryzhakar@gmail.com" },
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: GNU Affero General Public License v3 or later (AGPLv3+)",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Topic :: Multimedia :: Video",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
 dependencies = [
     "hdbscan>=0.8.40",
     "numba>=0.57.1",
@@ -38,7 +38,26 @@ dependencies = [
     "umap-learn>=0.5.7",
 ]
 
-[dependency-groups]
+[project.optional-dependencies]
 dev = [
     "devtools>=0.12.2",
 ]
+
+[project.urls]
+Homepage = "https://github.com/ryzhakar/cinextract"
+Repository = "https://github.com/ryzhakar/cinextract.git"
+
+[project.scripts]
+cinextract = "cinextract.__main__:app"
+
+[tool.hatch.version]
+path = "cinextract/__init__.py"
+
+[tool.hatch.build.targets.sdist]
+include = ["/cinextract"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["/cinextract"]
+
+[tool.ruff]
+line-length = 88
