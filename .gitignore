@@ -1,3 +1,4 @@
+.*.py
 *.parquet
 *.pth
 .DS_Store
